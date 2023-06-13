@@ -7,10 +7,9 @@ from langchain.chains.question_answering import load_qa_chain
 from langchain.chains import AnalyzeDocumentChain
 from langchain.docstore.document import Document
 from langchain.document_loaders.base import BaseLoader
-from langchain.document_loaders import PlaywrightURLLoader
+
 
 load_dotenv()
-os.environ["LANGCHAIN_HANDLER"] = "langchain"
 logger = logging.getLogger(__name__)
 
 
@@ -103,20 +102,56 @@ class URLLoader(BaseLoader):
 url = "https://www.amazon.com/Stanley-Quick-Flip-GO-Bottle/dp/B08RXT2YVL?ref_=ast_sto_dp&th=1&psc=1"
 query = "What is the price of the bottle?"
 
-# custom loader
-loader = URLLoader(urls=[url], headless=True)
-# baseline loader
-# loader = PlaywrightURLLoader(urls=[url], headless=True)
 
-webpage = loader.load()
-print(webpage[0].page_content)
+def answer(query: str, 
+           url: Optional[str] = None, 
+           filename: Optional[str] = None,
+           output_llm_input: bool = False):
+    """Answer a question from reading a website"""
 
-llm = ChatOpenAI()  # type: ignore
+    assert (url is None) ^ (filename is None), "Exactly one of url or html_path must be provided"
+    
+    if url:
+        loader = URLLoader(urls=[url], headless=True)
+        page_content = loader.load()[0].page_content
+    elif filename:
+        with open(filename, 'r') as f:
+            page_content = f.read()
+    else:
+        # unreachable code but use else branch to fix linter complaint
+        page_content = ""
 
-qa_chain = load_qa_chain(llm, chain_type="map_reduce")
-qa_document_chain = AnalyzeDocumentChain(combine_docs_chain=qa_chain)
-output = qa_document_chain(
-    {"input_document": webpage[0].page_content, "question": query},
-    return_only_outputs=True,
-)
-print(output)
+    if output_llm_input:
+        print(page_content)
+
+    llm = ChatOpenAI()  # type: ignore
+
+    qa_chain = load_qa_chain(llm, chain_type="map_reduce")
+    qa_document_chain = AnalyzeDocumentChain(combine_docs_chain=qa_chain)
+    output = qa_document_chain(
+        {"input_document": page_content, "question": query},
+        return_only_outputs=True,
+    )
+    print("Answer:", output['output_text'])
+
+
+def download(url: str, 
+             filename: str,
+             output_content: bool = False):
+    """Download a webpage to a file"""
+    loader = URLLoader(urls=[url], headless=True)
+    page_content = loader.load()[0].page_content
+    with open(filename, 'w') as f:
+        f.write(page_content)
+    if output_content:
+        print(page_content)
+
+
+if __name__ == "__main__":
+    import fire
+
+    fire.Fire({
+            'ans': answer,
+            'dl': download
+        })
+
