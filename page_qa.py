@@ -1,4 +1,3 @@
-import os
 import logging
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -12,6 +11,9 @@ from langchain.prompts.chat import (
     HumanMessagePromptTemplate,
     SystemMessagePromptTemplate,
 )
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+from html2text2 import html2text
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -37,22 +39,6 @@ class URLLoader(BaseLoader):
         remove_selectors: Optional[List[str]] = None,
     ):
         """Load a list of URLs using Playwright and unstructured."""
-        try:
-            import playwright  # noqa:F401
-        except ImportError:
-            raise ImportError(
-                "playwright package not found, please install it with "
-                "`pip install playwright`"
-            )
-
-        try:
-            import unstructured  # noqa:F401
-        except ImportError:
-            raise ValueError(
-                "unstructured package not found, please install it with "
-                "`pip install unstructured`"
-            )
-
         self.urls = urls
         self.continue_on_failure = continue_on_failure
         self.headless = headless
@@ -64,10 +50,6 @@ class URLLoader(BaseLoader):
         Returns:
             List[Document]: A list of Document instances with loaded content.
         """
-        from playwright.sync_api import sync_playwright
-        from readabilipy import simple_tree_from_html_string
-        from html2text import html2text
-        from unstructured.partition.html import partition_html
 
         docs: List[Document] = list()
 
@@ -87,24 +69,76 @@ class URLLoader(BaseLoader):
                     page_source = page.content()
                     # readabilipy is used to remove scripts and styles
                     # simple_tree = simple_tree_from_html_string(page_source)
-                    simple_tree = page_source
+
+                    soup = BeautifulSoup(
+                        "".join(s.strip() for s in page_source.split("\n")),
+                        "html.parser",
+                    )
+
+                    for s in soup.select("script"):
+                        s.extract()
+                    for s in soup.select("style"):
+                        s.extract()
+
+                    def add_divider(node, threshold):
+                        if isinstance(node, str):
+                            return
+                        tags = set()
+                        children_count = set()
+                        for child in node.children:
+                            if child == "\n":
+                                child.decompose()
+
+                            add_divider(  # pylint: disable=cell-var-from-loop
+                                child, threshold
+                            )
+                            tags.add(child.name)
+                            if hasattr(child, "contents"):
+                                children_count.add(len(child.contents))
+
+                        if (
+                            node.name
+                            not in {
+                                "ul",
+                                "ol",
+                                "table",
+                                "tbody",
+                                "thead",
+                                "tr",
+                                "td",
+                                "th",
+                            }
+                            and len(tags) == 1
+                            and len(children_count) == 1
+                            and len(node.contents) >= threshold
+                        ):
+                            for i in range(-len(node.contents) + 1, 0, 1):
+                                new_tag = soup.new_tag(
+                                    "p"
+                                )  # pylint: disable=cell-var-from-loop
+                                new_tag.string = "---"
+                                node.insert(i, new_tag)
+
+                    add_divider(soup.body, 3)
+                    simple_tree = soup.prettify()
+                    print(simple_tree)
                     # html2text is used to convert html to markdown
                     text = html2text(str(simple_tree))
                     metadata = {"source": url}
                     docs.append(Document(page_content=text, metadata=metadata))
-                except Exception as e:
+                except Exception as err:  # pylint: disable=broad-except
                     if self.continue_on_failure:
                         logger.error(
-                            f"Error fetching or processing {url}, exception: {e}"
+                            "Error fetching or processing %s, exception: %s", url, err
                         )
                     else:
-                        raise e
+                        raise err
             browser.close()
         return docs
 
 
 system_template = """Use the following portion of a long document to see if any of the text is relevant to answer the question. 
-Return any relevant text verbatim. If there is no relevant text, return an empty string.
+Return any relevant text verbatim. If there is no relevant text, say exactly "None." and nothing more.
 ______________________
 {context}"""
 messages = [
@@ -150,12 +184,14 @@ def answer(
     if output_llm_input:
         print(page_content)
 
-    llm = ChatOpenAI()  # type: ignore
+    llm_map = ChatOpenAI(temperature=0)  # type: ignore
+    llm_reduce = ChatOpenAI()  # type: ignore
 
     qa_chain = _load_map_reduce_chain(
-        llm,
+        llm_map,
         question_prompt=CHAT_QUESTION_PROMPT,
         combine_prompt=CHAT_COMBINE_PROMPT,
+        reduce_llm=llm_reduce,
         verbose=True,
     )
     qa_document_chain = AnalyzeDocumentChain(combine_docs_chain=qa_chain)
